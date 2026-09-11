@@ -1,0 +1,9 @@
+pandas
+numpy
+torch
+xgboost
+scikit-learn
+scipy
+matplotlib
+chess
+requests

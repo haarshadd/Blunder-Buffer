@@ -1,0 +1,26 @@
+# Databases and Raw Data
+data/
+*.db
+*.sqlite
+*.csv
+*.pgn
+*.zip
+
+# Compiled ML Models
+saved_models/
+*.pkl
+*.pt
+*.pth
+
+# Executables and Local Logs
+stockfish.exe
+others/*.txt
+others/*.docx
+
+# Python Virtual Environments & Cache
+__pycache__/
+*.py[cod]
+*DS_Store
+venv/
+env/
+.env
