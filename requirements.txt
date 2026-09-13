@@ -7,3 +7,4 @@ scipy
 matplotlib
 chess
 requests
+beautifulsoup4
