@@ -1,27 +1,21 @@
 """
 Chess-Results adapter.
 
-Parses Chess-Results Board Pairings pages into ChessGameEvent objects.
+Parses Chess-Results Board Pairings pages into normalized
+ChessGameEvent objects.
 
-The parser is designed for team tournaments where individual games are
-represented in the form:
+The parser works at the HTML <tr> level because Chess-Results
+renders each individual game as its own table row.
 
-    1.1
-    Player A
-    1562
-    IND
-    -
-    Player B
-    1881
-    USA
-    0 - 1
+Example:
 
-or, after HTML rendering:
+    1.1 | Player A | 1562 | IND | - | Player B | 1881 | USA | 0 - 1
 
-    1.1 Player A 1562 IND - Player B 1881 USA 0 - 1
+Team tournament notation:
 
-The parser deliberately looks for complete individual-game patterns rather
-than treating arbitrary HTML table rows as games.
+    1.1 = team match 1, individual board 1
+    1.2 = team match 1, individual board 2
+    2.1 = team match 2, individual board 1
 """
 
 from __future__ import annotations
@@ -37,7 +31,7 @@ from workers.adapters.base import ChessSourceAdapter
 
 
 class ChessResultsAdapter(ChessSourceAdapter):
-    """Adapter for Chess-Results Board Pairings pages."""
+    """Chess-Results Board Pairings adapter."""
 
     BASE_URL = "https://chess-results.com"
 
@@ -66,9 +60,9 @@ class ChessResultsAdapter(ChessSourceAdapter):
             }
         )
 
-    # ------------------------------------------------------------------
+    # ================================================================
     # URL
-    # ------------------------------------------------------------------
+    # ================================================================
 
     def _round_url(self, round_number: int) -> str:
         return (
@@ -82,26 +76,26 @@ class ChessResultsAdapter(ChessSourceAdapter):
             f"&zeilen=9999"
         )
 
-    # ------------------------------------------------------------------
+    # ================================================================
     # Text helpers
-    # ------------------------------------------------------------------
+    # ================================================================
 
     @staticmethod
-    def _clean_text(value: str) -> str:
+    def _clean(value: str) -> str:
         return " ".join(
             str(value or "").split()
         ).strip()
 
     @staticmethod
     def _normalize_result(
-        result: Optional[str],
+        value: Optional[str],
     ) -> Optional[str]:
 
-        if not result:
+        if not value:
             return None
 
         value = (
-            result
+            value
             .replace("½", "1/2")
             .replace("–", "-")
             .replace("—", "-")
@@ -124,13 +118,13 @@ class ChessResultsAdapter(ChessSourceAdapter):
 
         return None
 
-    # ------------------------------------------------------------------
-    # Player cleanup
-    # ------------------------------------------------------------------
+    # ================================================================
+    # Titles
+    # ================================================================
 
     @staticmethod
-    def _remove_titles(name: str) -> str:
-        titles = {
+    def _is_title(value: str) -> bool:
+        return value.upper() in {
             "GM",
             "IM",
             "FM",
@@ -143,184 +137,324 @@ class ChessResultsAdapter(ChessSourceAdapter):
             "AIM",
         }
 
-        parts = name.split()
-
-        return " ".join(
-            part
-            for part in parts
-            if part.upper() not in titles
-        )
-
     @classmethod
     def _clean_player_name(
         cls,
-        name: str,
+        value: str,
     ) -> str:
 
-        name = cls._clean_text(name)
+        value = cls._clean(value)
 
-        name = cls._remove_titles(name)
+        parts = [
+            part
+            for part in value.split()
+            if not cls._is_title(part)
+        ]
 
-        return cls._clean_text(name)
-
-    # ------------------------------------------------------------------
-    # Game pattern
-    # ------------------------------------------------------------------
-
-    @classmethod
-    def _game_pattern(cls) -> re.Pattern:
-        """
-        Match one complete individual game.
-
-        Example:
-
-            1.1 Alexander, Easther 1562 NSN -
-            Ainul Fikri, Aqilah Husna 1881 WP 0 - 1
-
-        The player names are captured lazily until a rating + federation
-        pair is encountered.
-
-        This is intentionally based on the rendered text rather than
-        specific HTML tags.
-        """
-
-        return re.compile(
-            r"""
-            (?<![\w.])
-            (?P<team_board>\d+)
-            \.
-            (?P<player_board>\d+)
-
-            \s+
-
-            (?P<white>.*?)
-            \s+
-            (?P<white_rating>\d{3,4})
-            \s+
-            (?P<white_fed>[A-Z]{3})
-
-            \s*-\s*
-
-            (?P<black>.*?)
-            \s+
-            (?P<black_rating>\d{3,4})
-            \s+
-            (?P<black_fed>[A-Z]{3})
-
-            (?:
-                \s+
-                (?P<result>
-                    1\s*-\s*0
-                    |
-                    0\s*-\s*1
-                    |
-                    ½\s*-\s*½
-                    |
-                    1/2\s*-\s*1/2
-                )
-            )?
-
-            (?=\s|$)
-            """,
-            re.VERBOSE,
+        return cls._clean(
+            " ".join(parts)
         )
 
-    # ------------------------------------------------------------------
-    # Parse games
-    # ------------------------------------------------------------------
+    # ================================================================
+    # Rating / result
+    # ================================================================
+
+    @staticmethod
+    def _is_rating(value: str) -> bool:
+        """
+        Chess-Results ratings in the relevant range.
+
+        This deliberately excludes years such as 2026.
+        """
+
+        return bool(
+            re.fullmatch(
+                r"(?:1\d{3}|2\d{3})",
+                value,
+            )
+        )
+
+    @staticmethod
+    def _extract_result(
+        cells: list[str],
+    ) -> Optional[str]:
+
+        for value in reversed(cells):
+
+            normalized = (
+                value
+                .replace("½", "1/2")
+                .replace("–", "-")
+                .replace("—", "-")
+            )
+
+            if re.fullmatch(
+                r"(?:1\s*-\s*0|0\s*-\s*1|1/2\s*-\s*1/2)",
+                normalized,
+            ):
+                return ChessResultsAdapter._normalize_result(
+                    normalized
+                )
+
+        return None
+
+    # ================================================================
+    # Individual row parser
+    # ================================================================
 
     @classmethod
-    def _parse_games(
+    def _parse_game_row(
         cls,
-        page_text: str,
-    ) -> list[dict]:
+        row,
+    ) -> Optional[dict]:
+        """
+        Parse one actual Chess-Results individual-game <tr>.
 
-        pattern = cls._game_pattern()
+        Real example observed from Chess-Results:
 
-        games: list[dict] = []
+            [
+                '1.1',
+                '',
+                'Alexander, Easther',
+                '',
+                'Alexander, Easther',
+                '1562',
+                'NSN',
+                '-',
+                '',
+                'Ainul Fikri, Aqilah Husna',
+                '',
+                'Ainul Fikri, Aqilah Husna',
+                '1881',
+                'WP',
+                '0 - 1'
+            ]
 
-        for match in pattern.finditer(page_text):
+        Important:
+        Some rows contain a title such as AFM/WCM between the
+        separator and the player name.
+        """
 
-            white = cls._clean_player_name(
-                match.group("white")
+        cells = [
+            cls._clean(
+                cell.get_text(
+                    " ",
+                    strip=True,
+                )
             )
-
-            black = cls._clean_player_name(
-                match.group("black")
+            for cell in row.find_all(
+                ["td", "th"]
             )
+        ]
 
-            if not white or not black:
+        cells = [
+            value
+            for value in cells
+            if value
+            or value == "-"
+        ]
+
+        if not cells:
+            return None
+
+        # ------------------------------------------------------------
+        # First cell must be an individual board marker.
+        #
+        # Accept:
+        #   1.1
+        #   2.4
+        #   10.3
+        # ------------------------------------------------------------
+
+        board_match = re.fullmatch(
+            r"(\d+)\.(\d+)",
+            cells[0],
+        )
+
+        if not board_match:
+            return None
+
+        team_board = int(
+            board_match.group(1)
+        )
+
+        player_board = int(
+            board_match.group(2)
+        )
+
+        if team_board < 1:
+            return None
+
+        if not 1 <= player_board <= 20:
+            return None
+
+        # ------------------------------------------------------------
+        # Find the separator between white and black.
+        # ------------------------------------------------------------
+
+        separator_index = None
+
+        for index, value in enumerate(
+            cells[1:],
+            start=1,
+        ):
+            if value == "-":
+                separator_index = index
+                break
+
+        if separator_index is None:
+            return None
+
+        white_cells = cells[
+            1:separator_index
+        ]
+
+        black_cells = cells[
+            separator_index + 1:
+        ]
+
+        if not white_cells or not black_cells:
+            return None
+
+        # ------------------------------------------------------------
+        # Find the white rating.
+        #
+        # It should occur before the federation code.
+        # ------------------------------------------------------------
+
+        white_rating_index = None
+
+        for index, value in enumerate(
+            white_cells
+        ):
+            if cls._is_rating(value):
+                white_rating_index = index
+                break
+
+        if white_rating_index is None:
+            return None
+
+        white_rating = int(
+            white_cells[
+                white_rating_index
+            ]
+        )
+
+        # ------------------------------------------------------------
+        # Find the black rating.
+        # ------------------------------------------------------------
+
+        black_rating_index = None
+
+        for index, value in enumerate(
+            black_cells
+        ):
+            if cls._is_rating(value):
+                black_rating_index = index
+                break
+
+        if black_rating_index is None:
+            return None
+
+        black_rating = int(
+            black_cells[
+                black_rating_index
+            ]
+        )
+
+        # ------------------------------------------------------------
+        # Player names.
+        #
+        # Chess-Results may duplicate a linked player name:
+        #
+        #   ''
+        #   'Alexander, Easther'
+        #   ''
+        #   'Alexander, Easther'
+        #
+        # We choose the longest meaningful text before the rating.
+        #
+        # Titles such as AFM/WCM are ignored.
+        # ------------------------------------------------------------
+
+        white_name_candidates = []
+
+        for value in white_cells[
+            :white_rating_index
+        ]:
+            if not value:
                 continue
 
-            team_board = int(
-                match.group("team_board")
-            )
-
-            player_board = int(
-                match.group("player_board")
-            )
-
-            # ----------------------------------------------------------
-            # Safety checks.
-            #
-            # These prevent navigation/page metadata from being
-            # interpreted as a game.
-            # ----------------------------------------------------------
-
-            if player_board < 1 or player_board > 20:
+            if cls._is_title(value):
                 continue
 
-            if team_board < 1:
+            white_name_candidates.append(
+                value
+            )
+
+        black_name_candidates = []
+
+        for value in black_cells[
+            :black_rating_index
+        ]:
+            if not value:
                 continue
 
-            # A genuine player name should not contain page-navigation
-            # phrases.
-            bad_phrases = (
-                "board pairings",
-                "search for player",
-                "search board",
-                "ranking list",
-                "statistics",
-                "creator/last upload",
-                "last update",
-                "round on",
-            )
-
-            combined = (
-                f"{white} {black}"
-            ).lower()
-
-            if any(
-                phrase in combined
-                for phrase in bad_phrases
-            ):
+            if cls._is_title(value):
                 continue
 
-            result = cls._normalize_result(
-                match.group("result")
+            black_name_candidates.append(
+                value
             )
 
-            games.append(
-                {
-                    "team_board": team_board,
-                    "player_board": player_board,
-                    "white": white,
-                    "black": black,
-                    "white_rating": int(
-                        match.group("white_rating")
-                    ),
-                    "black_rating": int(
-                        match.group("black_rating")
-                    ),
-                    "result": result,
-                }
-            )
+        if not white_name_candidates:
+            return None
 
-        return games
+        if not black_name_candidates:
+            return None
 
-    # ------------------------------------------------------------------
+        white = max(
+            white_name_candidates,
+            key=len,
+        )
+
+        black = max(
+            black_name_candidates,
+            key=len,
+        )
+
+        white = cls._clean_player_name(
+            white
+        )
+
+        black = cls._clean_player_name(
+            black
+        )
+
+        if not white or not black:
+            return None
+
+        # ------------------------------------------------------------
+        # Result.
+        # ------------------------------------------------------------
+
+        result = cls._extract_result(
+            cells
+        )
+
+        return {
+            "team_board": team_board,
+            "player_board": player_board,
+            "white": white,
+            "black": black,
+            "white_rating": white_rating,
+            "black_rating": black_rating,
+            "result": result,
+        }
+
+    # ================================================================
     # Fetch round
-    # ------------------------------------------------------------------
+    # ================================================================
 
     def fetch_events(
         self,
@@ -343,17 +477,7 @@ class ChessResultsAdapter(ChessSourceAdapter):
             "html.parser",
         )
 
-        # --------------------------------------------------------------
-        # IMPORTANT:
-        #
-        # Use spaces here, not newlines.
-        #
-        # Chess-Results can split one player's information over several
-        # HTML elements. get_text(" ") reconstructs it into a stable
-        # searchable representation.
-        # --------------------------------------------------------------
-
-        page_text = self._clean_text(
+        page_text = self._clean(
             soup.get_text(
                 " ",
                 strip=True,
@@ -362,47 +486,50 @@ class ChessResultsAdapter(ChessSourceAdapter):
 
         lower_text = page_text.lower()
 
-        # --------------------------------------------------------------
-        # If the actual Board Pairings section isn't present, the
-        # requested round has not been published.
-        # --------------------------------------------------------------
+        # ------------------------------------------------------------
+        # If Board Pairings is absent, this round is not published.
+        # ------------------------------------------------------------
 
         if "board pairings" not in lower_text:
             return []
 
-        # --------------------------------------------------------------
-        # Parse complete individual games.
-        # --------------------------------------------------------------
-
-        games = self._parse_games(
-            page_text
-        )
-
-        # --------------------------------------------------------------
-        # Future round / unpublished pairings.
+        # ------------------------------------------------------------
+        # Parse ONLY actual table rows.
         #
-        # Chess-Results may still display the Board Pairings navigation
-        # or heading even when there are zero actual game records.
-        #
-        # Therefore zero parsed games is a valid "not published yet"
-        # state, not automatically a parser failure.
-        # --------------------------------------------------------------
+        # This is the critical fix.
+        # ------------------------------------------------------------
 
-        if not games:
+        parsed_games = []
+
+        for row in soup.find_all("tr"):
+
+            parsed = self._parse_game_row(
+                row
+            )
+
+            if parsed is not None:
+                parsed_games.append(
+                    parsed
+                )
+
+        # ------------------------------------------------------------
+        # No actual game rows means pairings haven't been published
+        # yet, even if the page contains the "Board Pairings" heading.
+        # ------------------------------------------------------------
+
+        if not parsed_games:
             return []
 
-        # --------------------------------------------------------------
-        # Deduplicate.
-        #
-        # event_id currently contains:
-        # tournament + section + round + board + players
-        #
-        # This protects against duplicated HTML content.
-        # --------------------------------------------------------------
+        # ------------------------------------------------------------
+        # Convert into normalized events.
+        # ------------------------------------------------------------
 
-        events: dict[str, ChessGameEvent] = {}
+        events: dict[
+            str,
+            ChessGameEvent,
+        ] = {}
 
-        for game in games:
+        for game in parsed_games:
 
             event = ChessGameEvent(
                 tournament_id=self.tournament_id,
@@ -410,40 +537,31 @@ class ChessResultsAdapter(ChessSourceAdapter):
                 round_number=int(
                     round_number
                 ),
-
-                # Store the individual board.
-                #
-                # 1.1 -> board 1
-                # 1.2 -> board 2
-                # etc.
                 board=game[
                     "player_board"
                 ],
-
                 white=game["white"],
                 black=game["black"],
-
                 white_rating=game[
                     "white_rating"
                 ],
-
                 black_rating=game[
                     "black_rating"
                 ],
-
                 result=game["result"],
-
                 source="chess_results",
                 source_url=url,
             )
 
             events[event.event_id] = event
 
-        return list(events.values())
+        return list(
+            events.values()
+        )
 
-    # ------------------------------------------------------------------
+    # ================================================================
     # Cleanup
-    # ------------------------------------------------------------------
+    # ================================================================
 
     def close(self) -> None:
         self.session.close()
