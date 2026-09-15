@@ -23,6 +23,8 @@ from datetime import datetime, timezone
 
 from live.config import TournamentConfig
 from live.events import ChessGameEvent
+from live.staged_predict import stage0, DB_PATH
+from core.ledger import resolve_prediction
 
 from workers.adapters.base import (
     ChessSourceAdapter,
@@ -151,6 +153,24 @@ class RealtimeChessWorker:
                 f"{event.status}"
             )
 
+            if not event.has_result:
+
+                prediction = stage0(
+                    event.white,
+                    event.black,
+                    datetime.now(timezone.utc).date().isoformat(),
+                    event_id=event.event_id,
+                )
+
+                probs = prediction["probabilities"]
+
+                print(
+                    f"       T0 "
+                    f"black={probs['black']:.3f} "
+                    f"draw={probs['draw']:.3f} "
+                    f"white={probs['white']:.3f}"
+                )
+
         for event in changed_events:
 
             print(
@@ -160,6 +180,21 @@ class RealtimeChessWorker:
                 f"result={event.result}"
             )
 
+            if event.has_result:
+
+                surprise = resolve_prediction(
+                    DB_PATH,
+                    event.event_id,
+                    "pregame_meta_wd_v1",
+                    event.result,
+                )
+
+                if surprise is not None:
+                    print(
+                        f"       T0 RESOLVED "
+                        f"actual={event.result} "
+                        f"surprise={surprise:.4f}"
+                    )
         return {
             "events": events,
             "new": new_events,

@@ -14,14 +14,40 @@ DB_PATH=os.path.join(ROOT,'data','omni_pundit.db')
 BASE_MODEL=os.path.join(ROOT,'saved_models','baseline_expert.pkl')
 MOM_MODEL=os.path.join(ROOT,'saved_models','momentum_expert_xgb.pkl')
 
-def _key(s): return str(s).replace(' ','').strip().lower()
+def _key(s):
+    return str(s or "").replace(" ", "").strip().lower()
+
+
+def _surname(player):
+    value = str(player or "").strip()
+    return value.split(",", 1)[0].strip().lower()
+
 
 def _latest(conn, player, date):
-    k=_key(player)
-    q="SELECT white,black,white_elo,black_elo,date FROM baseline_features WHERE date < ? AND (lower(replace(white,' ',''))=? OR lower(replace(black,' ',''))=?) ORDER BY date DESC LIMIT 1"
-    r=conn.execute(q,[date,k,k]).fetchone()
-    if not r: return np.nan
-    return float(r[2] if _key(r[0])==k else r[3]) if (r[2] if _key(r[0])==k else r[3]) is not None else np.nan
+    surname = _surname(player)
+
+    q = """
+        SELECT white, black, white_elo, black_elo, date
+        FROM baseline_features
+        WHERE date < ?
+          AND (
+              lower(trim(white)) LIKE ?
+              OR lower(trim(black)) LIKE ?
+          )
+        ORDER BY date DESC
+    """
+
+    pattern = surname + ",%"
+    rows = conn.execute(q, [date, pattern, pattern]).fetchall()
+
+    for r in rows:
+        if _surname(r[0]) == surname:
+            return float(r[2]) if r[2] is not None else np.nan
+
+        if _surname(r[1]) == surname:
+            return float(r[3]) if r[3] is not None else np.nan
+
+    return np.nan
 
 def baseline_probs(white,black,date,db_path=DB_PATH):
     art=pickle.load(open(BASE_MODEL,'rb'))
@@ -29,12 +55,31 @@ def baseline_probs(white,black,date,db_path=DB_PATH):
     conn=sqlite3.connect(db_path)
     we,be=_latest(conn,white,date),_latest(conn,black,date)
     wh=bh=d=0
-    wk,bk=_key(white),_key(black)
-    rows=conn.execute("SELECT white,black,target_result FROM baseline_features WHERE date < ? AND ((lower(replace(white,' ',''))=? AND lower(replace(black,' ',''))=?) OR (lower(replace(white,' ',''))=? AND lower(replace(black,' ',''))=?))",[date,wk,bk,bk,wk]).fetchall()
+    wk = _surname(white)
+    bk = _surname(black)
+    rows = conn.execute(
+    """
+    SELECT white, black, target_result
+    FROM baseline_features
+    WHERE date < ?
+      AND (
+          (
+              lower(trim(white)) LIKE ?
+              AND lower(trim(black)) LIKE ?
+          )
+          OR
+          (
+              lower(trim(white)) LIKE ?
+              AND lower(trim(black)) LIKE ?
+          )
+      )
+    """,
+    [date, wk + ",%", bk + ",%", bk + ",%", wk + ",%"],
+).fetchall()
     conn.close()
-    for rw,rb,y in rows:
-        wwin=(y==1) if _key(rw)==wk else (y==-1)
-        bwin=(y==-1) if _key(rw)==wk else (y==1)
+    for rw, rb, y in rows:
+        wwin = (y == 1) if _surname(rw) == wk else (y == -1)
+        bwin = (y == -1) if _surname(rw) == wk else (y == 1)
         wh+=int(wwin); bh+=int(bwin); d+=int(y==0)
     has=int(np.isfinite(we) and np.isfinite(be))
     we=0 if not np.isfinite(we) else we; be=0 if not np.isfinite(be) else be
