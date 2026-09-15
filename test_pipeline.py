@@ -41,6 +41,8 @@ def test_system():
         champion_metrics=champ_metrics,
         min_improvement=0.002  # Requires at least a 0.002 jump to promote
     )
+    assert success is False
+    assert "Improvement below noise margin" in reason
 
 if __name__ == "__main__":
     test_system()

@@ -61,8 +61,14 @@ def evaluate_and_promote(db_path, sport, layer, challenger_id, training_window, 
         print(reason)
         return False, reason
     
-    if chal_holdout >= champ_holdout:
-        reason = f"BLOCKED: Challenger failed to improve on fresh data (Chal: {chal_holdout:.4f} >= Champ: {champ_holdout:.4f})"
+    improvement = champ_holdout - chal_holdout
+
+    if improvement < min_improvement:
+        reason = (
+            f"BLOCKED: Improvement below noise margin "
+            f"(Chal: {chal_holdout:.4f}, Champ: {champ_holdout:.4f}, "
+            f"improvement: {improvement:.4f}, required: {min_improvement:.4f})"
+        )
         print(reason)
         return False, reason
 

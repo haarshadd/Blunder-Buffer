@@ -8,3 +8,4 @@ matplotlib
 chess
 requests
 beautifulsoup4
+pytest
