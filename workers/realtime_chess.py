@@ -160,6 +160,7 @@ class RealtimeChessWorker:
                     event.black,
                     datetime.now(timezone.utc).date().isoformat(),
                     event_id=event.event_id,
+                    db_path=DB_PATH
                 )
 
                 probs = prediction["probabilities"]
@@ -171,30 +172,30 @@ class RealtimeChessWorker:
                     f"white={probs['white']:.3f}"
                 )
 
-        for event in changed_events:
+            for event in changed_events:
 
-            print(
+                print(
                 f"  UPD  "
                 f"{event.event_id} | "
                 f"status={event.status} "
                 f"result={event.result}"
             )
 
-            if event.has_result:
+        for event in finished:
 
-                surprise = resolve_prediction(
-                    DB_PATH,
-                    event.event_id,
-                    "pregame_meta_wd_v1",
-                    event.result,
+            surprise = resolve_prediction(
+                DB_PATH,
+                event.event_id,
+                "pregame_meta_wd_v1",
+                event.result,
+            )
+
+            if surprise is not None:
+                print(
+                    f"       T0 RESOLVED "
+                    f"actual={event.result} "
+                    f"surprise={surprise:.4f}"
                 )
-
-                if surprise is not None:
-                    print(
-                        f"       T0 RESOLVED "
-                        f"actual={event.result} "
-                        f"surprise={surprise:.4f}"
-                    )
         return {
             "events": events,
             "new": new_events,
