@@ -1,219 +1,386 @@
 # Blunder Buffer
 
-**A self-improving, auditable ML framework for chess prediction using experience replay and Champion/Challenger model governance.**
+**A self-improving, auditable probabilistic forecasting engine for chess — built to learn from its mistakes without blindly replacing a reliable model.**
 
-## Overview
+Blunder Buffer began as a historical chess prediction project and is evolving into a **real-time, tournament-aware forecasting system**.
 
-Blunder Buffer is an end-to-end machine learning system for chess outcome prediction. It combines historical chess data, feature engineering, multiple expert models, psychological/contextual features, a prediction ledger, experience replay, and controlled challenger-model promotion.
-
-The project is designed around an important ML lifecycle problem: **how can a predictive system learn from its mistakes without blindly replacing a reliable model?**
-
-Blunder Buffer addresses this with two complementary mechanisms:
-
-- **Experience Replay** — deliberately reuses important past predictions, especially confident mistakes, recent examples, and historical anchor examples.
-- **Champion/Challenger Governance** — evaluates a newly trained model against the current champion on a fresh holdout set and promotes it only when it provides a meaningful improvement without unacceptable regression.
+Its first real-world deployment target is the **46th FIDE Chess Olympiad 2026**. The Olympiad is a test environment, not the architectural boundary: the core is designed around normalized chess-game events so that the same system can eventually support Swiss tournaments, round robins, Candidates/World Championship events, and other chess formats.
 
 ---
 
-## System Architecture
+## Why Blunder Buffer?
+
+A prediction model is useful only if its probabilities remain trustworthy over time.
+
+Blunder Buffer therefore treats forecasting as a complete lifecycle:
 
 ```text
-                         BLUNDER BUFFER
-                              │
-              ┌───────────────┴───────────────┐
-              │                               │
-        DATA PIPELINE                    MODEL SYSTEM
-              │                               │
-              ▼                               ▼
-          TWIC / PGN                    Expert Models
-              │                               │
-              ▼                               ▼
-       SQLite Database                 OOF Predictions
-              │                               │
-              ▼                               ▼
-      Feature Engineering             Meta Learner
-              │                               │
-              ▼                               ▼
-    Psychological Context          Prediction Ledger
-              │                               │
-              └───────────────┬───────────────┘
-                              ▼
-                     Experience Replay
-                              │
-                              ▼
-                     Challenger Model
-                              │
-                              ▼
-                  Champion / Challenger
-                       Evaluation
-                       │         │
-                     FAIL       PASS
-                       │         │
-                    Reject    Promote
-                                  │
-                                  ▼
-                            New Champion
+Historical Games
+      │
+      ▼
+Feature Engineering
+      │
+      ├──────────────┬──────────────┐
+      ▼              ▼              ▼
+   Baseline         ECO         Momentum
+    Expert         Expert         Expert
+      │              │              │
+      └──────────────┬──────────────┘
+                     ▼
+                Meta Learner
+                     │
+                     ▼
+              Prediction Ledger
+                     │
+              Actual Outcome
+                     │
+                     ▼
+              Surprise Score
+                     │
+                     ▼
+              Experience Replay
+                     │
+                     ▼
+             Challenger Training
+                     │
+                     ▼
+          Champion / Challenger
+               Governance
 ```
 
----
+The system is built around two complementary ideas:
 
-## Key Components
+1. **Experience Replay** — important mistakes, recent examples, and historical anchors are deliberately reused during future training.
+2. **Champion/Challenger Governance** — a challenger must demonstrate meaningful improvement on a fresh holdout and pass regression checks before it can replace the champion.
 
-### 1. Data Ingestion
 
-`workers/ingest.py` downloads TWIC PGN archives, filters games involving selected target players, and stores the relevant games and metadata in SQLite.
 
-The ingestion pipeline is designed to process games individually rather than loading the entire archive into memory.
+# Architecture
 
-### 2. Feature Engineering
-
-`workers/feature_extractor.py` constructs baseline features from historical games while avoiding future-information leakage.
-
-Features include:
-
-- Elo difference and Elo availability
-- Head-to-head historical results
-- Rest
-- Rolling fatigue
-- Consecutive-loss / tilt context
-- Black's recent draw rate
-- Historical game metadata
-
-### 3. Chess Analysis
-
-`workers/chess_analysis.py` uses Stockfish to calculate move-level centipawn loss and derives:
-
-- White ACPL
-- Black ACPL
-- Target-game ACPL information
-
-The analysis pipeline supports batched processing and progress persistence.
-
-### 4. Expert Models
-
-The system maintains multiple prediction experts whose out-of-fold predictions can be consumed by the meta learner.
-
-The current pipeline includes expert prediction layers associated with:
-
-- Baseline
-- ECO / opening context
-- Momentum
-
-Their OOF probability outputs become part of the meta-model's deep input.
-
-### 5. Psychological / Context Layer
-
-The meta learner incorporates contextual differentials such as:
-
-- Rest difference
-- Fatigue difference
-- Tilt difference
-- Black draw-rate context
-- Elo difference
-
-These form the **wide feature path**, while expert-model probabilities form the **deep feature path**.
-
-### 6. Prediction Ledger
-
-`core/ledger.py` provides an append-only source of truth for model predictions.
-
-Each prediction can later be resolved against the actual outcome. The system computes a **surprise score** based on the probability assigned to the outcome that actually occurred.
-
-This makes model mistakes measurable and reusable rather than simply discarded.
-
-### 7. Experience Replay
-
-`core/replay_buffer.py` builds training batches from three complementary slices:
+## Historical prediction pipeline
 
 ```text
-40%  Prioritized experiences
-     → high-surprise / confident mistakes
+TWIC / PGN
+   │
+   ▼
+SQLite
+   │
+   ▼
+Historical Features
+   │
+   ├───────────────┬────────────────┐
+   ▼               ▼                ▼
+Baseline          ECO            Momentum
+Expert            Expert          Expert
+   │               │                │
+   └───────────────┼────────────────┘
+                   ▼
+             OOF Predictions
+                   │
+                   ▼
+              Meta Learner
+                   │
+                   ▼
+          Prediction Probabilities
+```
 
-40%  Recent random experiences
+
+---
+
+# Live Tournament Architecture
+
+The live system treats a tournament as a stream of **normalized game events**, rather than hard-coding a particular tournament workflow.
+
+Different external sources can provide different parts of the event:
+
+```text
+Chess-Results
+    │
+    ├── Pairings
+    ├── Players
+    ├── Ratings
+    └── Results
+          │
+          ▼
+     ChessGameEvent
+          ▲
+          │
+Live Broadcast / PGN
+    │
+    ├── Moves
+    ├── ECO / opening
+    └── Live game state
+```
+
+
+## Staged prediction lifecycle
+
+### T0 — Pregame
+
+When a pairing becomes known:
+
+```text
+Pairing appears
+      │
+      ▼
+Baseline + Momentum + Context
+      │
+      ▼
+Pregame Meta Learner
+      │
+      ▼
+T0 Prediction
+      │
+      ▼
+Prediction Ledger
+```
+
+T0 is produced **before the game starts** and is immutable.
+
+### T1 — Opening-conditioned
+
+When live game information makes an ECO/opening condition available:
+
+```text
+Live PGN / Moves
+      │
+      ▼
+Observed ECO
+      │
+      ▼
+ECO Expert
+      │
+      ├── Baseline
+      ├── ECO
+      └── Momentum
+             │
+             ▼
+      Opening-aware Meta
+             │
+             ▼
+          T1 Ledger
+```
+
+T1 is a **new prediction**, not an overwrite of T0.
+
+
+### T2 — Result
+
+When the game finishes:
+
+```text
+Final Result
+     │
+     ▼
+Resolve Ledger Prediction
+     │
+     ▼
+Surprise Score
+     │
+     ▼
+Replay / Evaluation
+```
+
+The surprise score is based on the probability assigned to the outcome that actually occurred.
+
+---
+
+# Prediction Ledger
+
+`core/ledger.py` provides the append-only source of truth for predictions.
+
+Each prediction records:
+
+- Event ID
+- Sport
+- Model version
+- Class labels
+- Predicted probabilities
+- Prediction timestamp
+- Actual outcome, once known
+- Surprise score, once resolved
+
+The ledger makes predictions auditable and allows mistakes to become training information instead of disappearing after inference.
+
+The event ID is designed to be deterministic and source-independent enough for deduplication and recovery.
+
+---
+
+# Model System
+
+Blunder Buffer uses multiple specialists rather than forcing every signal through a single model.
+
+## Baseline Expert
+
+The baseline expert captures fundamental pregame information such as:
+
+- White Elo
+- Black Elo
+- Elo difference
+- Elo availability
+- Historical wins
+- Historical draws
+
+## ECO Expert
+
+The ECO specialist models opening-specific information.
+
+It uses:
+
+- ECO code
+- Player/opening familiarity
+- Familiarity differential
+
+It is an **observed-information specialist** and therefore belongs to the opening-conditioned T1 stage rather than pure pregame prediction.
+
+## Momentum Expert
+
+The momentum specialist models recent player-state signals including:
+
+- Residual performance difference
+- Elo trend difference
+- Volatility difference
+- Color-adjusted residual difference
+
+## ACPL Specialist
+
+The ACPL expert is a research specialist based on Stockfish-derived move-quality information.
+
+Because move-level engine analysis is expensive and unavailable before a game begins, ACPL is not part of the initial T0 live path.
+
+It remains a candidate specialist for future live/post-game analysis.
+
+---
+
+# Meta Learning
+
+Blunder Buffer uses Wide & Deep models to combine contextual information with expert probabilities.
+
+Conceptually:
+
+```text
+                    ┌────────────────────┐
+                    │ Expert Probabilities│
+                    └─────────┬──────────┘
+                              ▼
+                         Deep Path
+                              │
+Context Features ───────► Wide Path
+                              │
+                              ▼
+                          Combined
+                              │
+                              ▼
+                       3-Class Output
+```
+
+The output classes are:
+
+```text
+Black win
+Draw
+White win
+```
+
+The live system currently maintains separate meta-learning stages:
+
+- **Pregame Wide & Deep** — T0
+- **Opening-aware Wide & Deep** — T1
+
+This prevents information that only becomes available after the game begins from leaking into the pregame forecast.
+
+---
+
+# Leakage Discipline
+
+A central design requirement is that a prediction must only use information that would have been available at the prediction timestamp.
+
+### Allowed for T0
+
+- Historical player results
+- Historical Elo
+- Historical head-to-head information
+- Historical rest/fatigue/context features
+- Previously trained model outputs
+
+### Not allowed for T0
+
+- Final game result
+- Future games
+- Future opening information
+- Moves from the game being predicted
+- Post-game engine analysis
+
+### Allowed for T1
+
+Everything available to T0, plus information legitimately observed after the game has started, such as an observed ECO/opening condition.
+
+This separation is fundamental to making live accuracy measurements meaningful.
+
+---
+
+# Experience Replay
+
+`core/replay_buffer.py` deliberately samples from different parts of the historical experience.
+
+```text
+40%  Prioritized Experiences
+     → high-surprise / important mistakes
+
+40%  Recent Random Experiences
      → current distribution
 
-20%  Historical anchors
+20%  Historical Anchors
      → older examples for stability
 ```
 
-The resulting batch is deduplicated and shuffled before training.
+The sampled training batch is deduplicated and shuffled.
 
-This design aims to reduce catastrophic forgetting while still allowing the system to learn from recent and important failures.
-
-### 8. Wide & Deep Challenger
-
-`train_meta.py` trains a PyTorch Wide & Deep neural network.
-
-The architecture contains:
-
-```text
-Expert OOF Probabilities
-          │
-          ▼
-     Deep Path
-   Linear → ReLU
-       → Dropout
-          │
-          ├──────────────┐
-          │              │
-          │       Wide Context Features
-          │              │
-          └──────┬───────┘
-                 ▼
-             Combined
-                 │
-          Linear → ReLU
-              → Dropout
-                 │
-                 ▼
-        3-Class Prediction
-```
-
-The output represents the three chess result classes used by the training pipeline.
-
-The challenger is evaluated using **log loss** on a separate fresh holdout window before promotion.
+Experience Replay balances adaptation to recent data with historical stability.
 
 ---
 
-## Champion / Challenger Governance
+# Champion / Challenger Governance
 
-The model lifecycle is controlled by `core/orchestrator.py` and `core/registry.py`.
+A model is not promoted simply because it trains successfully.
 
-A challenger is not promoted merely because it trains successfully.
-
-The evaluation flow is:
+`core/orchestrator.py` evaluates a challenger against the current champion.
 
 ```text
 Train Challenger
-      │
-      ▼
-Fresh Holdout Evaluation
-      │
-      ▼
+       │
+       ▼
+Fresh Holdout
+       │
+       ▼
 Compare Log Loss
-      │
-      ├── Insufficient improvement ──► Reject
-      │
-      ├── Regression on protected anchors ──► Reject
-      │
-      └── Meaningful improvement
-                    │
-                    ▼
-                 Promote
-                    │
-                    ▼
-             Model Registry
+       │
+       ├── Improvement too small ──► Reject
+       │
+       ├── Protected-anchor regression ──► Reject
+       │
+       └── Meaningful improvement
+                         │
+                         ▼
+                      Promote
+                         │
+                         ▼
+                  Model Registry
 ```
 
-The test pipeline explicitly verifies the minimum-improvement margin used to prevent promotion based on tiny changes that may be statistical noise.
+The governance layer includes a **minimum improvement/noise margin** so that tiny apparent gains are not treated as meaningful improvements.
+
+Lower log loss is better.
+
+The registry records model lineage and promotion state so that model changes remain auditable.
 
 ---
 
-## Model Registry
+# Model Registry
 
-`core/registry.py` maintains model lineage and promotion state.
+`core/registry.py` maintains model lineage.
 
-The registry records information such as:
+Recorded information includes:
 
 - Model version
 - Sport
@@ -224,41 +391,249 @@ The registry records information such as:
 - Promotion time
 - Champion status
 
-This provides an auditable history of model evolution.
 
 ---
 
-## Anomaly Investigation
+# Tournament Standings Forecasting
 
-`investigate_anomaly.py` provides a targeted diagnostic for extreme surprise-score predictions.
+A major next capability is to move from **individual game prediction** to **tournament-level forecasting**.
 
-It queries the prediction ledger together with baseline features to investigate cases where the model assigned an extremely small probability to the actual outcome.
+This is especially important for Swiss tournaments such as the Chess Olympiad.
 
-This is useful for distinguishing:
+## MVP: Standings Prediction
 
-- genuinely surprising outcomes
-- model blind spots
-- probability-calibration problems
-- numerical/probability-floor effects
+The first tournament-level MVP is **not full simulation**.
+
+The goal is:
+
+> **Given the current tournament state and the remaining schedule/pairings, estimate the final standings distribution.**
+
+Conceptually:
+
+```text
+Current Standings
+       │
+       ├── Current Scores
+       ├── Board Points
+       ├── Tie-break context
+       └── Remaining Pairings
+                  │
+                  ▼
+          Game-level Probabilities
+                  │
+                  ▼
+          Expected Future Points
+                  │
+                  ▼
+          Final Standings Forecast
+```
+
+The system should eventually answer:
+
+- Which teams are most likely to finish first?
+- Probability of finishing in the top 3 / top 10 / top N
+- Expected final match points
+- Expected board points
+- Probability distribution over finishing positions
+- How much the current round changes the standings outlook
+
+### Full tournament simulation
+
+Full Monte Carlo tournament simulation is a **later capability**, not the initial standings MVP.
+
+Once the standings forecaster is reliable, simulation can repeatedly sample future game/team outcomes:
+
+```text
+Current State
+     │
+     ▼
+Sample remaining outcomes
+     │
+     ▼
+Recalculate standings
+     │
+     ▼
+Repeat thousands of times
+     │
+     ▼
+Distribution of final standings
+```
+
+The important architectural point is that **simulation should consume the forecasting engine**, not become a second independent prediction system.
 
 ---
 
-## Testing
+# Streamlit Interface
 
-`test_pipeline.py` exercises important system-level behavior rather than only testing isolated functions.
+The planned Streamlit UI will expose the forecasting system without requiring users to inspect SQLite databases or terminal output.
 
-It checks:
+Initial dashboard concepts:
 
-1. Scoped Experience Replay sampling
-2. Surprise-score retrieval
-3. Champion/Challenger evaluation
-4. Minimum-improvement / noise-margin behavior
+```text
+┌──────────────────────────────────────────────┐
+│              BLUNDER BUFFER                  │
+├──────────────────────────────────────────────┤
+│ Live Tournament        Round 1               │
+│                                              │
+│ T0 Predictions       T1 Updates              │
+│ ───────────────      ───────────────         │
+│ Game A               Game A                  │
+│ W 50% D 26% B 24%    W 52% D 24% B 24%      │
+│                                              │
+├──────────────────────────────────────────────┤
+│              Standings Forecast              │
+│                                              │
+│ Team       Current  Expected  Top-3         │
+│ ...                                           │
+└──────────────────────────────────────────────┘
+```
 
-Example configuration uses a 0.002 minimum improvement threshold, allowing the system to reject a challenger whose apparent gain is too small.
+The UI should eventually provide:
+
+- Live tournament state
+- Game-level predictions
+- T0 → T1 prediction changes
+- Completed prediction accuracy
+- Surprise-score leaders
+- Team standings forecast
+- Model/champion information
+- Historical calibration metrics
+- Replay/challenger status
+
 
 ---
 
-## Project Structure
+# Tournament Abstraction
+
+Blunder Buffer should not contain an Olympiad-specific prediction engine.
+
+The tournament layer is configuration-driven:
+
+```python
+TournamentConfig(
+    tournament_id="...",
+    section="open",
+    source="chess_results",
+    poll_seconds=60,
+)
+```
+
+The event layer normalizes individual games into `ChessGameEvent` objects containing information such as:
+
+- Tournament ID
+- Section
+- Round
+- Board
+- White / Black
+- Ratings
+- FIDE IDs when available
+- Teams
+- Scheduled time
+- Status
+- Result
+- ECO
+- Source
+- Moves
+
+This makes the live worker reusable across tournament types.
+
+---
+
+# Tournament Formats
+
+The target abstraction is broader than the Olympiad.
+
+### Swiss
+
+```text
+Round N result
+      │
+      ▼
+Next pairing generated
+      │
+      ▼
+Pregame prediction
+      │
+      ▼
+Game
+      │
+      ▼
+Result
+      │
+      ▼
+Standings update
+```
+
+### Round Robin
+
+Pairings may already exist as a complete schedule, but each game can still be normalized into the same event model.
+
+### Team Tournaments
+
+Team context becomes part of the event/standings layer while individual board games remain the basic prediction units.
+
+### Candidates / World Championship
+
+The same game-event and ledger concepts can be used with format-specific standings and scheduling logic.
+
+---
+
+# Recovery and Reliability
+
+Live systems must survive restarts.
+
+The worker therefore does not rely exclusively on in-memory state.
+
+```text
+Worker instance A
+      │
+      ▼
+Prediction logged to ledger
+      │
+      X
+   restart
+      │
+      ▼
+Worker instance B
+      │
+      ▼
+Same finished event observed
+      │
+      ▼
+Existing ledger prediction found
+      │
+      ▼
+Prediction resolved
+```
+
+This behavior is covered by a dedicated recovery test.
+
+The ledger is the persistent source of truth; worker memory is only operational state.
+
+---
+
+# Data
+
+The historical database contains a large collection of chess games and engineered features.
+
+Large artifacts are intentionally excluded from Git.
+
+Examples:
+
+- SQLite databases
+- Raw PGN files
+- CSV datasets
+- Trained model artifacts
+- Stockfish executables
+- Generated logs
+- Documents
+- Python caches
+- Virtual environments
+
+
+---
+
+# Project Structure
 
 ```text
 Blunder-Buffer/
@@ -268,18 +643,39 @@ Blunder-Buffer/
 │   ├── ledger.py
 │   ├── orchestrator.py
 │   ├── registry.py
-│   └── replay_buffer.py
+│   ├── replay_buffer.py
+│   └── __init__.py
+│
+├── live/
+│   ├── config.py
+│   ├── eco.py
+│   ├── events.py
+│   ├── features_live.py
+│   ├── opening_update.py
+│   ├── pregame.py
+│   ├── staged_predict.py
+│   ├── train_pregame_meta.py
+│   └── __init__.py
 │
 ├── workers/
-│   ├── ingest.py
+│   ├── adapters/
+│   │   ├── base.py
+│   │   └── chess_results.py
+│   ├── chess_analysis.py
 │   ├── feature_extractor.py
-│   └── chess_analysis.py
+│   ├── ingest.py
+│   └── realtime_chess.py
 │
 ├── notebooks/
 │   └── models.ipynb
 │
 ├── others/
 │   └── twic_historical_loop.py
+│
+├── tests/
+│   ├── test_chess_results_adapter.py
+│   ├── test_worker_t0.py
+│   └── worker_recovery.py
 │
 ├── investigate_anomaly.py
 ├── test_pipeline.py
@@ -291,118 +687,175 @@ Blunder-Buffer/
 
 ---
 
-## Data and Model Artifacts
+# Running
 
-Large and generated artifacts are intentionally excluded from version control.
-
-Examples include:
-
-- SQLite databases
-- Raw PGN/CSV datasets
-- Trained model artifacts
-- Stockfish executables
-- Generated logs and documents
-- Python cache files
-- Virtual environments
-
-This keeps the repository lightweight while preserving the source code required to understand and reproduce the pipeline.
-
----
-
-## Requirements
-
-The project uses Python with libraries including:
-
-- pandas
-- NumPy
-- PyTorch
-- XGBoost
-- scikit-learn
-- SciPy
-- Matplotlib
-- python-chess
-- requests
-
-Install dependencies with:
+Create/activate a virtual environment and install dependencies:
 
 ```bash
-pip install -r requirements.txt
+python -m pip install -r requirements.txt
 ```
+
+For module-based worker execution, run from the repository root:
+
+```bash
+python -m workers.realtime_chess --tournament-id <TOURNAMENT_ID> --section open --round 1 --poll 60
+```
+
+The worker polls a configured source, normalizes newly observed events, creates T0 predictions for unfinished games, and resolves predictions when results become available.
 
 ---
 
-## Running the Pipeline
+# Current Olympiad Deployment
 
-The repository is organized around separate stages rather than a single monolithic script.
+The **46th FIDE Chess Olympiad 2026** is the first real-world test environment for the live chess pipeline.
 
-Typical workflow:
+The deployment is intentionally treated as an adapter/configuration problem:
 
 ```text
-1. Ingest historical games
-        ↓
-2. Build baseline/context features
-        ↓
-3. Run chess-engine analysis
-        ↓
-4. Generate expert predictions
-        ↓
-5. Maintain / backfill prediction ledger
-        ↓
-6. Build Experience Replay batch
-        ↓
-7. Train Wide & Deep challenger
-        ↓
-8. Evaluate on fresh holdout
-        ↓
-9. Champion / Challenger decision
-        ↓
-10. Registry update
+Olympiad
+   │
+   ├── Chess-Results
+   │      └── Pairings / results
+   │
+   └── Live broadcast source
+          └── Moves / opening information
 ```
 
-Before running the full pipeline, make sure the required local data and Stockfish executable are available in the expected locations. These artifacts are deliberately not committed to the repository.
+
+The immediate live objective is:
+
+```text
+Round 1 pairing
+      ↓
+T0 prediction
+      ↓
+Ledger
+      ↓
+Game result
+      ↓
+T0 resolution
+      ↓
+Surprise score
+```
+
+The next stage adds opening-conditioned T1 predictions when a reliable live move/ECO source is available.
 
 ---
 
-## Design Principles
+# Roadmap
 
-### Learn from mistakes, not just new data
+## Phase 1 — Historical foundation
 
-High-surprise predictions contain valuable information. The replay system ensures important failures can influence subsequent training.
+- [x] TWIC ingestion
+- [x] Feature engineering
+- [x] Baseline expert
+- [x] ECO expert
+- [x] Momentum expert
+- [x] ACPL research specialist
+- [x] OOF prediction pipeline
+- [x] Meta learning
 
-### Preserve historical stability
+## Phase 2 — Learning and governance
 
-A system that only trains on recent data can forget older behavior. Historical anchor sampling helps maintain long-term calibration.
+- [x] Prediction ledger
+- [x] Surprise scoring
+- [x] Experience Replay
+- [x] Model registry
+- [x] Champion/Challenger evaluation
+- [x] Minimum-improvement gate
+- [x] Anomaly investigation
 
-### Never promote blindly
+## Phase 3 — Live chess
 
-A challenger must demonstrate meaningful improvement and pass regression checks before becoming the new champion.
+- [x] Normalized chess events
+- [x] Tournament configuration
+- [x] Chess-Results adapter
+- [x] T0 pregame inference
+- [x] Persistent ledger integration
+- [x] Worker restart/recovery
+- [x] Result resolution
+- [ ] Live move/ECO adapter
+- [ ] T1 worker integration
+- [ ] End-to-end live tournament test
 
-### Keep an audit trail
+## Phase 4 — Tournament intelligence
 
-Predictions, outcomes, surprise scores, and model versions are recorded so model behavior can be inspected after the fact.
+- [ ] Current standings ingestion
+- [ ] Game-level remaining-round forecast
+- [ ] Expected final standings
+- [ ] Position/top-N probabilities
+- [ ] Board-point / match-point forecasting
+- [ ] Full Monte Carlo tournament simulation
 
-### Separate experimentation from governance
+## Phase 5 — Product layer
 
-Training a model and deciding whether that model should become production champion are treated as different responsibilities.
+- [ ] Streamlit live dashboard
+- [ ] Calibration dashboard
+- [ ] Prediction history
+- [ ] Surprise/anomaly views
+- [ ] Model governance views
+
+## Phase 6 — Self-improving production system
+
+- [ ] Scheduled retraining
+- [ ] Automated challenger generation
+- [ ] Automated holdout evaluation
+- [ ] Controlled model deployment
+- [ ] Continuous monitoring
+- [ ] Cross-tournament validation
+
+## Phase 7 — Beyond chess
+
+The long-term architecture is intended to generalize the same forecasting lifecycle to other sports:
+
+```text
+Sport Event
+    ↓
+Normalized Event
+    ↓
+Pregame Forecast
+    ↓
+Live Information Updates
+    ↓
+Outcome
+    ↓
+Evaluation
+    ↓
+Experience Replay
+    ↓
+Governed Model Improvement
+```
+
+Chess is the first domain because it provides a rich combination of historical data, structured events, live state changes, and measurable outcomes.
+
+
+# Project Philosophy
+
+Blunder Buffer is ultimately an experiment in **self-improving probabilistic forecasting**.
+
+The central question is not simply:
+
+> "Can the model predict the next chess game?"
+
+It is:
+
+> **"Can a forecasting system observe its own prediction errors, preserve what it already knows, learn from important failures, and improve without promoting itself blindly?"**
+
+The tournament layer extends that question from individual games to larger decisions:
+
+```text
+Game Forecast
+      ↓
+Round Forecast
+      ↓
+Standings Forecast
+      ↓
+Tournament Simulation
+```
+
 
 ---
 
-## Current Scope
-
-Blunder Buffer is currently focused on **chess prediction**, while several core components are intentionally designed around reusable model-governance concepts such as sport/model scoping, prediction ledgers, replay sampling, registries, and challenger evaluation.
-
----
-
-## Project Status
-
-**Research / experimental production pipeline**
-
-The system contains an implemented ingestion pipeline, feature engineering, chess-engine analysis, prediction ledger, experience replay, neural meta-learning, anomaly investigation, and Champion/Challenger governance.
-
-Future work can include live inference, automated deployment, richer monitoring, calibration dashboards, and broader validation across additional datasets.
-
----
-
-## License
+# License
 
 No license has been specified yet.
